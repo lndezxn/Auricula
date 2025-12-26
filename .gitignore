@@ -1,0 +1,35 @@
+/out
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sqlite
+*.sqlite3
+# Dependency directories
+node_modules/
+vendor/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+env/
+ENV/
+__pycache__/
+
+# IDE and tooling
+.vscode/
+.idea/
+*.iml
+*.suo
+*.user
+*.swp
+
+/checkpoints
+/third_party

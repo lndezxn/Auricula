@@ -20,6 +20,7 @@ build/
 env/
 ENV/
 __pycache__/
+/.pytest_cache
 
 # IDE and tooling
 .vscode/

@@ -19,6 +19,7 @@ from .prompting import (
     save_prompts,
 )
 from .audio.audioldm2 import AudioLDM2Generator
+from .audio.mix import mix_soundscape
 from .utils import audio_io, io as io_utils
 from .vision import (
     load_models,
@@ -144,14 +145,6 @@ def _load_meta(meta_json: Path) -> dict[str, object]:
             pass
     return {"source": str(meta_json), "note": "fallback metadata"}
 
-
-def _collect_stems(tracks_dir: Path, stems_dir: Path) -> None:
-    for wav_file in sorted(tracks_dir.glob("*.wav")):
-        io_utils.write_text(stems_dir / wav_file.name, f"Stem derived from {wav_file.name}")
-
-
-def _write_mix(mix_file: Path, tracks_dir: Path) -> None:
-    io_utils.write_text(mix_file, f"Mix generated from tracks in {tracks_dir}")
 
 
 @app.command()
@@ -289,14 +282,18 @@ def mix(
     meta_json: Path = typer.Option(..., exists=True, file_okay=True),
     out: Path = typer.Option(..., help="Mix filename that lives inside the mix directory"),
 ) -> None:
-    conf = _prepare_config(None)
     metadata = _load_meta(meta_json)
-    mix_dir = conf.mix_dir
-    stems_dir = io_utils.ensure_dir(mix_dir / "stems")
-    mix_file = mix_dir / out.name
-    _write_mix(mix_file, tracks_dir)
+    mix_file = Path(out)
+    mix_dir = mix_file.parent
+    mix_dir.mkdir(parents=True, exist_ok=True)
+    mix_soundscape(
+        tracks_dir,
+        meta_json,
+        mix_file,
+        target_sr=int(metadata.get("sample_rate", audio_io.TARGET_SAMPLE_RATE)),
+        peak_db=float(metadata.get("mixing", {}).get("peak_db", -1.0)),
+    )
     io_utils.write_json(mix_dir / "meta.json", metadata)
-    _collect_stems(tracks_dir, stems_dir)
     typer.echo(f"Mix written to {mix_file}")
 
 

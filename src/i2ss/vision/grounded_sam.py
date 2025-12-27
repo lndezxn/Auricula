@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -230,3 +230,24 @@ def save_segmentation(
 def _sanitize_label(label: str) -> str:
     cleaned = "".join(ch if ch.isalnum() else "_" for ch in label)
     return cleaned or "object"
+
+
+def find_object_by_point(objects: Iterable[dict[str, Any]], x: float, y: float) -> Optional[dict[str, Any]]:
+    """Return the object whose mask contains (x, y), preferring smaller areas if multiple hit."""
+    candidates: list[tuple[dict[str, Any], float, float]] = []
+    for obj in objects:
+        mask = obj.get("mask")
+        if mask is None:
+            continue
+        height, width = mask.shape[:2]
+        col = int(round(x))
+        row = int(round(y))
+        if 0 <= row < height and 0 <= col < width and mask[row, col]:
+            area = float(obj.get("area", mask.sum()))
+            score = float(obj.get("score", 0.0))
+            candidates.append((obj, area, score))
+    if not candidates:
+        return None
+    # Choose smallest area first, then highest score.
+    candidates.sort(key=lambda item: (item[1], -item[2]))
+    return candidates[0][0]

@@ -1,3 +1,5 @@
-"""Audio helper stubs for the i2ss package."""
+"""Audio helper utilities for the i2ss package."""
 
-__all__ = []
+from .audioldm2 import AudioLDM2Generator
+
+__all__ = ["AudioLDM2Generator"]

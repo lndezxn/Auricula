@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import cv2
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +15,11 @@ from .prompting import (
     build_audio_prompts,
     build_mix_meta,
     infer_scene_tags,
-    object_track_path,
     save_mix_meta,
     save_prompts,
 )
-from .utils import io as io_utils
+from .audio.audioldm2 import AudioLDM2Generator
+from .utils import audio_io, io as io_utils
 from .vision import (
     load_models,
     parse_text_queries,
@@ -99,14 +100,18 @@ def _write_segments_context(
     return meta_path
 
 
-def _load_prompts(prompts_json: Path) -> dict[str, Any]:
-    if not prompts_json.exists():
-        raise typer.BadParameter(f"Missing prompts file: {prompts_json}")
-    with prompts_json.open(encoding="utf-8") as fp:
+def _read_json_object(source: Path) -> dict[str, Any]:
+    if not source.exists():
+        raise typer.BadParameter(f"Missing JSON file: {source}")
+    with source.open(encoding="utf-8") as fp:
         payload = json.load(fp)
     if not isinstance(payload, dict):
-        raise typer.BadParameter(f"Expected object payload in {prompts_json}")
+        raise typer.BadParameter(f"Expected object payload in {source}")
     return payload
+
+
+def _load_prompts(prompts_json: Path) -> dict[str, Any]:
+    return _read_json_object(prompts_json)
 
 
 def _render_tracks(conf: Config, prompts: dict[str, Any]) -> None:
@@ -118,8 +123,8 @@ def _render_tracks(conf: Config, prompts: dict[str, Any]) -> None:
         conf.tracks_dir / "background.wav",
         f"Background track | {seconds}s @ seed {seed} | prompt: {background_prompt}",
     )
-    for obj in prompts.get("objects", []):
-        track_path = object_track_path(conf.tracks_dir, obj)
+    for idx, obj in enumerate(prompts.get("objects", [])):
+        track_path = audio_io.build_object_path(conf.tracks_dir, obj.get("id", idx), obj.get("label", "object"))
         duration = int(obj.get("seconds", seconds))
         prompt_text = obj.get("prompt", obj.get("label", "object"))
         io_utils.write_text(
@@ -179,23 +184,103 @@ def caption(
 @app.command()
 def generate(
     prompts_json: Path = typer.Option(..., exists=True, file_okay=True),
+    meta_json: Path = typer.Option(..., exists=True, file_okay=True),
     out: Path | None = typer.Option(None, help="Optional output root override"),
-    seconds: int | None = typer.Option(None, help="Duration override in seconds"),
-    seed: int | None = typer.Option(None, help="Random seed override"),
+    steps: int = typer.Option(50, help="Diffusion steps used per track"),
+    guidance_scale: float = typer.Option(3.5, help="Guidance scale used by AudioLDM2"),
 ) -> None:
+    if steps <= 0:
+        raise typer.BadParameter("steps must be greater than zero")
+    if guidance_scale <= 0:
+        raise typer.BadParameter("guidance_scale must be positive")
     conf = _prepare_config(out)
     prompts = _load_prompts(prompts_json)
-    if seconds is not None:
-        prompts["seconds"] = max(1, seconds)
-    if seed is not None:
-        prompts["seed"] = seed
-    save_prompts(conf.tracks_dir, prompts)
-    mix_meta = build_mix_meta(prompts, conf.tracks_dir)
-    save_mix_meta(conf.tracks_dir, mix_meta)
-    _render_tracks(conf, prompts)
-    typer.echo(
-        f"Generated artifacts -> prompts: {conf.tracks_dir / 'prompts.json'}, meta: {conf.tracks_dir / 'meta.json'}"
+    meta = _read_json_object(meta_json)
+    background_prompt = prompts.get("background")
+    if not isinstance(background_prompt, dict) or not background_prompt.get("prompt"):
+        raise typer.BadParameter("prompts JSON requires background.prompt")
+    objects_prompts = prompts.get("objects")
+    if not isinstance(objects_prompts, list) or not objects_prompts:
+        raise typer.BadParameter("prompts JSON requires objects list")
+    meta_background = meta.get("background")
+    if not isinstance(meta_background, dict) or "path" not in meta_background:
+        raise typer.BadParameter("meta JSON requires background.path")
+    generator = AudioLDM2Generator()
+    background_seconds = int(prompts.get("seconds", conf.seconds))
+    background_seed = int(prompts.get("seed", conf.seed))
+    start = time.perf_counter()
+    background_audio, background_sr = generator.generate(
+        background_prompt["prompt"],
+        background_seconds,
+        background_seed,
+        num_inference_steps=steps,
+        guidance_scale=guidance_scale,
+        negative_prompt=background_prompt.get("negative_prompt"),
     )
+    background_wave, sample_rate = audio_io.prepare_waveform(
+        background_audio, background_sr, background_seconds
+    )
+    background_path = conf.tracks_dir / "background.wav"
+    audio_io.write_audio(background_path, background_wave, sample_rate)
+    background_last = audio_io.last_non_silent_time(background_wave, sample_rate)
+    typer.echo(
+        f"Background duration {len(background_wave) / sample_rate:.2f}s @ {sample_rate}Hz (last non-silent {background_last:.2f}s)"
+    )
+    meta_background["path"] = str(background_path)
+    meta["sample_rate"] = sample_rate
+    meta["seconds"] = background_seconds
+    meta_objects: list[dict[str, Any]] = meta.setdefault("objects", [])
+    meta_by_id = {
+        obj.get("id"): obj
+        for obj in meta_objects
+        if isinstance(obj, dict) and obj.get("id") is not None
+    }
+    object_paths: list[Path] = []
+    for idx, obj_prompt in enumerate(objects_prompts):
+        if not isinstance(obj_prompt, dict) or not obj_prompt.get("prompt"):
+            raise typer.BadParameter("each object prompt must contain id, label, seconds, prompt")
+        obj_id = obj_prompt.get("id", idx)
+        obj_label = obj_prompt.get("label", "object")
+        obj_seconds = int(obj_prompt.get("seconds", background_seconds))
+        if isinstance(obj_id, int):
+            obj_seed = background_seed + obj_id + 1
+        else:
+            obj_seed = background_seed + idx + 1
+        obj_negative = obj_prompt.get("negative_prompt")
+        waveform, sr = generator.generate(
+            obj_prompt["prompt"],
+            obj_seconds,
+            obj_seed,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            negative_prompt=obj_negative,
+        )
+        prepared_wave, sr = audio_io.prepare_waveform(waveform, sr, obj_seconds)
+        obj_path = audio_io.build_object_path(conf.tracks_dir, obj_id, obj_label)
+        audio_io.write_audio(obj_path, prepared_wave, sr)
+        object_paths.append(obj_path)
+        object_last = audio_io.last_non_silent_time(prepared_wave, sr)
+        typer.echo(
+            f"Object {obj_label} duration {len(prepared_wave) / sr:.2f}s @ {sr}Hz (last non-silent {object_last:.2f}s) -> {obj_path}"
+        )
+        meta_entry = meta_by_id.get(obj_id)
+        if meta_entry is None:
+            if idx < len(meta_objects):
+                meta_entry = meta_objects[idx]
+            else:
+                meta_entry = {}
+                meta_objects.append(meta_entry)
+        meta_entry.setdefault("id", obj_id)
+        meta_entry.setdefault("label", obj_label)
+        meta_entry["path"] = str(obj_path)
+    target_meta_path = conf.tracks_dir / "meta.json"
+    io_utils.write_json(target_meta_path, meta)
+    elapsed = time.perf_counter() - start
+    typer.echo(f"Background audio written to {background_path}")
+    for obj_path in object_paths:
+        typer.echo(f"Object audio written to {obj_path}")
+    typer.echo(f"Updated mix metadata -> {target_meta_path}")
+    typer.echo(f"AudioLDM2 generation completed in {elapsed:.2f}s")
 
 
 @app.command()

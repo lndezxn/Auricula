@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..utils import audio_io
+
 NEGATIVE_PROMPT = "music, singing, melody, instruments, distortion, low quality"
 BACKGROUND_TEMPLATES: dict[str, str] = {
     "city": "cityscape ambience with layered traffic, subway hum, and distant chatter, realistic, stereo, {seconds} seconds",
@@ -126,18 +128,6 @@ MIXING_CONFIG = {
     "limiter": True,
 }
 
-
-def _slugify_label(value: str) -> str:
-    cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in value.strip())
-    cleaned = cleaned.strip("_")
-    return cleaned or "object"
-
-
-def object_track_path(tracks_dir: Path, obj: dict[str, Any]) -> Path:
-    identity = obj.get("id")
-    base_id = str(identity) if identity is not None else "object"
-    stem = f"{base_id}_{_slugify_label(str(obj.get('label', 'object')))}"
-    return tracks_dir / "objects" / f"{stem}.wav"
 
 
 def _load_json(source: str | Path) -> dict[str, Any]:
@@ -307,7 +297,7 @@ def build_mix_meta(prompts: dict[str, Any], tracks_dir: Path) -> dict[str, Any]:
         area = int(obj.get("area", 0))
         pan = max(-1.0, min(1.0, (centroid_x - 0.5) * 2.0))
         gain_db = _compute_gain_db(area, a_min, a_max)
-        path = object_track_path(tracks_dir, obj)
+        path = audio_io.build_object_path(tracks_dir, obj.get("id"), obj.get("label", "object"))
         meta_objects.append(
             {
                 "id": obj.get("id"),

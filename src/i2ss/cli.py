@@ -1,6 +1,7 @@
 """Typer CLI that scaffolds segmentation and soundscape artifacts."""
 from __future__ import annotations
 
+import cv2
 import json
 from pathlib import Path
 from typing import Sequence
@@ -10,6 +11,12 @@ import typer
 from .config import Config
 from .utils import io as io_utils
 from .utils import viz
+from .vision import (
+    load_models,
+    parse_text_queries,
+    save_segmentation,
+    segment as run_grounded_segment,
+)
 
 app = typer.Typer(help="""i2ss CLI for creating segmentation, track, and mix artifacts.""")
 
@@ -23,17 +30,13 @@ def _prepare_config(out_dir: Path | None = None) -> Config:
     return config
 
 
-def _queries_list(value: str) -> list[str]:
-    return [segment.strip() for segment in value.split(".") if segment.strip()]
-
-
 def _slugify(value: str) -> str:
     candidate = "".join(ch if ch.isalnum() else "_" for ch in value.strip())
     return candidate or "object"
 
 
 def _build_segment(conf: Config, image: Path, queries: str) -> list[str]:
-    query_list = _queries_list(queries)
+    query_list = parse_text_queries(queries)
     io_utils.write_text(
         conf.segments_dir / "mask.png",
         f"Mask placeholder for {image} covering {len(query_list)} objects",
@@ -104,8 +107,18 @@ def segment(
     out: Path | None = typer.Option(None, help="Optional override for the output root directory"),
 ) -> None:
     conf = _prepare_config(out)
-    query_list = _build_segment(conf, image, queries)
-    typer.echo(f"Segment artifacts written to {conf.segments_dir} ({len(query_list)} objects)")
+    normalized_queries = parse_text_queries(queries)
+    if not normalized_queries:
+        raise typer.BadParameter("queries cannot be empty")
+
+    image_bgr = cv2.imread(str(image))
+    if image_bgr is None:
+        raise typer.BadParameter(f"Unable to load image at {image}")
+
+    dino_model, sam_predictor = load_models()
+    objects = run_grounded_segment(image_bgr, normalized_queries, dino_model, sam_predictor)
+    save_segmentation(conf.segments_dir, image, objects)
+    typer.echo(f"Segmentation artifacts written to {conf.segments_dir}")
 
 
 @app.command()
@@ -154,3 +167,11 @@ def run(
     typer.echo(
         f"Run completed: segments -> {conf.segments_dir}, tracks -> {conf.tracks_dir}",
     )
+
+
+def main() -> None:
+    app()
+
+
+if __name__ == "__main__":
+    main()

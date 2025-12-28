@@ -232,22 +232,54 @@ def _sanitize_label(label: str) -> str:
     return cleaned or "object"
 
 
+CLICK_FUZZ_RADIUS = 6
+
+
+def _mask_contains_point(mask: np.ndarray, row: int, col: int) -> bool:
+    height, width = mask.shape[:2]
+    if not (0 <= row < height and 0 <= col < width):
+        return False
+    return bool(mask[row, col])
+
+
+def _mask_near_point(mask: np.ndarray, row: int, col: int, radius: int) -> bool:
+    height, width = mask.shape[:2]
+    center_row = min(max(row, 0), height - 1)
+    center_col = min(max(col, 0), width - 1)
+    top = max(center_row - radius, 0)
+    bottom = min(center_row + radius + 1, height)
+    left = max(center_col - radius, 0)
+    right = min(center_col + radius + 1, width)
+    return mask[top:bottom, left:right].any()
+
+
 def find_object_by_point(objects: Iterable[dict[str, Any]], x: float, y: float) -> Optional[dict[str, Any]]:
     """Return the object whose mask contains (x, y), preferring smaller areas if multiple hit."""
+    row = int(round(y))
+    col = int(round(x))
     candidates: list[tuple[dict[str, Any], float, float]] = []
     for obj in objects:
         mask = obj.get("mask")
         if mask is None:
             continue
-        height, width = mask.shape[:2]
-        col = int(round(x))
-        row = int(round(y))
-        if 0 <= row < height and 0 <= col < width and mask[row, col]:
+        if _mask_contains_point(mask, row, col):
             area = float(obj.get("area", mask.sum()))
             score = float(obj.get("score", 0.0))
             candidates.append((obj, area, score))
-    if not candidates:
+    if candidates:
+        candidates.sort(key=lambda item: (item[1], -item[2]))
+        return candidates[0][0]
+    # Try expanding to nearby pixels in case the point is off by a few pixels.
+    near_candidates: list[tuple[dict[str, Any], float, float]] = []
+    for obj in objects:
+        mask = obj.get("mask")
+        if mask is None:
+            continue
+        if _mask_near_point(mask, row, col, radius=CLICK_FUZZ_RADIUS):
+            area = float(obj.get("area", mask.sum()))
+            score = float(obj.get("score", 0.0))
+            near_candidates.append((obj, area, score))
+    if not near_candidates:
         return None
-    # Choose smallest area first, then highest score.
-    candidates.sort(key=lambda item: (item[1], -item[2]))
-    return candidates[0][0]
+    near_candidates.sort(key=lambda item: (item[1], -item[2]))
+    return near_candidates[0][0]

@@ -316,10 +316,13 @@ def _remix(state: DemoState) -> tuple[str, DemoState]:
 def _handle_overlay_click(event: gr.SelectData, state: DemoState) -> tuple[Path | str, str | None, str, DemoState]:
     if event is None:
         raise ValueError("Click event missing coordinates")
-    x, y = _extract_click_coordinates(event)
+    overlay_width, overlay_height = _get_overlay_size(state)
+    x, y = _extract_click_coordinates(event, overlay_width, overlay_height)
     selected = find_object_by_point(state.objects, x, y)
     if selected is None:
-        raise ValueError("Clicked location is not inside any object mask.")
+        overlay_path = state.selected_overlay_path or (state.segments_dir / "overlay.png")
+        info = "Click inside an object mask to select it."
+        return overlay_path, gr.update(), info, state
     state.selected_id = selected.get("id")
     overlay_path = _highlight_overlay(state, state.selected_id)
     info = _format_object_info(selected)
@@ -336,13 +339,23 @@ def _parse_dropdown_value(value: str | None) -> int | None:
         return None
 
 
-def _extract_click_coordinates(event: gr.EventData) -> tuple[float, float]:
+def _get_overlay_size(state: DemoState) -> tuple[int, int]:
+    overlay_path = state.selected_overlay_path or (state.segments_dir / SELECTED_OVERLAY)
+    if not overlay_path.exists():
+        overlay_path = state.segments_dir / "overlay.png"
+    if not overlay_path.exists():
+        raise ValueError("No overlay image available for selection.")
+    with Image.open(overlay_path) as overlay:
+        return overlay.width, overlay.height
+
+
+def _extract_click_coordinates(event: gr.EventData, image_width: int, image_height: int) -> tuple[float, float]:
     data = getattr(event, "_data", {}) or {}
     event_index = getattr(event, "index", None)
     if isinstance(event_index, (tuple, list)) and len(event_index) >= 2:
-        row = float(event_index[0])
-        col = float(event_index[1])
-        return col, row
+        x = float(event_index[0])
+        y = float(event_index[1])
+        return _normalize_click_coordinates(x, y, image_width, image_height)
     for x_key, y_key in (
         ("x", "y"),
         ("X", "Y"),
@@ -352,14 +365,25 @@ def _extract_click_coordinates(event: gr.EventData) -> tuple[float, float]:
         x = data.get(x_key)
         y = data.get(y_key)
         if isinstance(x, (float, int)) and isinstance(y, (float, int)):
-            return float(x), float(y)
+            return _normalize_click_coordinates(float(x), float(y), image_width, image_height)
     value = data.get("value")
     if isinstance(value, dict):
         x = value.get("x") or value.get("X")
         y = value.get("y") or value.get("Y")
         if isinstance(x, (float, int)) and isinstance(y, (float, int)):
-            return float(x), float(y)
+            return _normalize_click_coordinates(float(x), float(y), image_width, image_height)
     raise ValueError("Click event missing coordinates")
+
+
+def _normalize_click_coordinates(x: float, y: float, image_width: int, image_height: int) -> tuple[float, float]:
+    if 0 <= x <= 1 and 0 <= y <= 1:
+        x *= image_width
+        y *= image_height
+    max_x = max(image_width - 1, 0)
+    max_y = max(image_height - 1, 0)
+    x = min(max(x, 0.0), max_x)
+    y = min(max(y, 0.0), max_y)
+    return x, y
 
 
 def _option_label_from_obj(obj: dict[str, Any]) -> str:

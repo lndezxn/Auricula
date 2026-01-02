@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torchvision.ops import nms
 
-DEFAULT_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+DEFAULT_DEVICE = "cpu"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 THIRD_PARTY = REPO_ROOT / "third_party"
 GROUNDINGDINO_ROOT = THIRD_PARTY / "GroundingDINO"
@@ -33,10 +33,15 @@ def _ensure_sys_path(path: Path) -> None:
         sys.path.insert(0, normalized)
 
 
-def _resolve_device(device: str | None) -> str:
+def _resolve_device(device: str | None, argument_name: str = "device") -> str:
     if device is None:
         return DEFAULT_DEVICE
-    return device
+    normalized = str(device).lower()
+    if normalized not in {"cpu", "cuda"}:
+        raise ValueError(f"{argument_name} must be one of ['cpu', 'cuda']")
+    if normalized == "cuda" and not torch.cuda.is_available():
+        raise ValueError(f"{argument_name} requested 'cuda' but CUDA is not available")
+    return normalized
 
 
 def parse_text_queries(raw_queries: str | Sequence[str]) -> list[str]:
@@ -60,9 +65,10 @@ def load_models(
     dino_repo_dir: Path | str | None = None,
     sam_ckpt: Path | str | None = None,
     device: str | None = None,
+    sam_device: str | None = None,
 ) -> tuple[Any, Any]:
     dino_repo_dir = Path(dino_repo_dir) if dino_repo_dir is not None else GROUNDINGDINO_ROOT
-    sam_ckpt = Path(sam_ckpt) if sam_ckpt is not None else REPO_ROOT / "checkpoints" / "sam_vit_h_4b8939.pth"
+    sam_ckpt = Path(sam_ckpt) if sam_ckpt is not None else REPO_ROOT / "checkpoints" / "sam_vit_b_01ec64.pth"
 
     _ensure_sys_path(dino_repo_dir)
     _ensure_sys_path(SAM_ROOT)
@@ -72,7 +78,8 @@ def load_models(
 
     config_path = dino_repo_dir / "groundingdino" / "config" / "GroundingDINO_SwinT_OGC.py"
     checkpoint_path = REPO_ROOT / "checkpoints" / "groundingdino_swint_ogc.pth"
-    resolved_device = _resolve_device(device)
+    resolved_device = _resolve_device(device, "device")
+    resolved_sam_device = _resolve_device(sam_device, "sam_device")
 
     dino_model = GroundingDINOModel(
         model_config_path=str(config_path),
@@ -80,11 +87,14 @@ def load_models(
         device=resolved_device,
     )
 
-    sam_constructor = sam_model_registry.get("vit_h")
+    # Use the ViT-B variant because the default checkpoint ships as sam_vit_b_01ec64.pth.
+    sam_constructor = sam_model_registry.get("vit_b")
     if sam_constructor is None:
-        raise RuntimeError("sam_model_registry is missing vit_h checkpoint constructor")
-    sam_model = sam_constructor(checkpoint=str(sam_ckpt)).to(resolved_device)
+        raise RuntimeError("sam_model_registry is missing vit_b checkpoint constructor")
+    sam_model = sam_constructor(checkpoint=str(sam_ckpt))
     sam_predictor = SamPredictor(sam_model)
+    if resolved_sam_device == "cuda":
+        sam_predictor.model.to("cuda")
 
     return dino_model, sam_predictor
 

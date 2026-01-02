@@ -5,9 +5,10 @@ import cv2
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import typer
+import torch
 
 from .captioning import caption_image, save_caption
 from .config import Config
@@ -41,7 +42,13 @@ def _prepare_config(out_dir: Path | None = None) -> Config:
 
 
 
-def _segment_and_save(image: Path, queries: str, conf: Config) -> tuple[list[dict[str, object]], list[str]]:
+def _segment_and_save(
+    image: Path,
+    queries: str,
+    conf: Config,
+    device: str,
+    sam_device: str,
+) -> tuple[list[dict[str, object]], list[str]]:
     normalized_queries = parse_text_queries(queries)
     if not normalized_queries:
         raise typer.BadParameter("queries cannot be empty")
@@ -50,10 +57,18 @@ def _segment_and_save(image: Path, queries: str, conf: Config) -> tuple[list[dic
     if image_bgr is None:
         raise typer.BadParameter(f"Unable to load image at {image}")
 
-    dino_model, sam_predictor = load_models()
-    objects = run_grounded_segment(image_bgr, normalized_queries, dino_model, sam_predictor)
-    save_segmentation(conf.segments_dir, image, objects)
-    return objects, normalized_queries
+    dino_model = sam_predictor = None
+    try:
+        dino_model, sam_predictor = load_models(device=device, sam_device=sam_device)
+        objects = run_grounded_segment(image_bgr, normalized_queries, dino_model, sam_predictor)
+        save_segmentation(conf.segments_dir, image, objects)
+        return objects, normalized_queries
+    finally:
+        if sam_predictor is not None:
+            del sam_predictor
+        if dino_model is not None:
+            del dino_model
+        torch.cuda.empty_cache()
 
 
 def _generate_caption(image: Path, conf: Config, model_id: str) -> str:
@@ -117,21 +132,38 @@ def _load_prompts(prompts_json: Path) -> dict[str, Any]:
 
 def _render_tracks(conf: Config, prompts: dict[str, Any]) -> None:
     io_utils.ensure_dir(conf.tracks_dir)
+    sample_rate = audio_io.TARGET_SAMPLE_RATE
     seconds = int(prompts.get("seconds", conf.seconds))
     seed = int(prompts.get("seed", conf.seed))
-    background_prompt = prompts.get("background", {}).get("prompt", "Background ambience")
-    io_utils.write_text(
-        conf.tracks_dir / "background.wav",
-        f"Background track | {seconds}s @ seed {seed} | prompt: {background_prompt}",
+    generator = AudioLDM2Generator(device="cuda" if torch.cuda.is_available() else "cpu")
+
+    background_cfg = prompts.get("background", {})
+    background_negative = background_cfg.get("negative_prompt")
+    background_wave, background_sr = generator.generate(
+        background_cfg.get("prompt", "Background ambience"),
+        seconds,
+        seed,
+        num_inference_steps=50,
+        guidance_scale=3.5,
+        negative_prompt=background_negative,
     )
+    background_wave, _ = audio_io.prepare_waveform(background_wave, background_sr, seconds, target_sr=sample_rate)
+    audio_io.write_audio(conf.tracks_dir / "background.wav", background_wave, sample_rate)
+
     for idx, obj in enumerate(prompts.get("objects", [])):
         track_path = audio_io.build_object_path(conf.tracks_dir, obj.get("id", idx), obj.get("label", "object"))
         duration = int(obj.get("seconds", seconds))
-        prompt_text = obj.get("prompt", obj.get("label", "object"))
-        io_utils.write_text(
-            track_path,
-            f"Object track for {obj.get('label', 'object')} | {duration}s @ seed {seed} | prompt: {prompt_text}",
+        obj_seed = seed + int(obj.get("id", idx)) + 1
+        obj_wave, obj_sr = generator.generate(
+            obj.get("prompt", obj.get("label", "object")),
+            duration,
+            obj_seed,
+            num_inference_steps=50,
+            guidance_scale=3.5,
+            negative_prompt=obj.get("negative_prompt"),
         )
+        obj_wave, _ = audio_io.prepare_waveform(obj_wave, obj_sr, duration, target_sr=sample_rate)
+        audio_io.write_audio(track_path, obj_wave, sample_rate)
 
 
 def _load_meta(meta_json: Path) -> dict[str, object]:
@@ -152,9 +184,17 @@ def segment(
     image: Path = typer.Option(..., exists=True, file_okay=True),
     queries: str = typer.Option(..., help="Dot-separated list of objects, e.g. car.person.dog"),
     out: Path | None = typer.Option(None, help="Optional override for the output root directory"),
+    device: Literal["cpu", "cuda"] = typer.Option(
+        "cpu",
+        help="Device for GroundingDINO (cpu or cuda)",
+    ),
+    sam_device: Literal["cpu", "cuda"] = typer.Option(
+        "cpu",
+        help="Device for the SAM predictor (cpu or cuda); on 8GB 4060 Ti prefer cpu",
+    ),
 ) -> None:
     conf = _prepare_config(out)
-    objects, normalized_queries = _segment_and_save(image, queries, conf)
+    objects, normalized_queries = _segment_and_save(image, queries, conf, device, sam_device)
     typer.echo(
         f"Segmentation artifacts written to {conf.segments_dir} ({len(objects)} detections)"
     )
@@ -311,11 +351,19 @@ def run(
         help="Optional hint that gets appended to the caption before prompt building",
     ),
     seconds: int = typer.Option(10, help="Duration used in prompt templates"),
+    device: Literal["cpu", "cuda"] = typer.Option(
+        "cpu",
+        help="Device for GroundingDINO (cpu or cuda)",
+    ),
+    sam_device: Literal["cpu", "cuda"] = typer.Option(
+        "cpu",
+        help="Device for the SAM predictor (cpu or cuda); on 8GB 4060 Ti prefer cpu",
+    ),
 ) -> None:
     if seconds <= 0:
         raise typer.BadParameter("seconds must be greater than zero")
     conf = _prepare_config(out)
-    objects, _ = _segment_and_save(image, queries, conf)
+    objects, _ = _segment_and_save(image, queries, conf, device, sam_device)
     caption_text = _generate_caption(image, conf, caption_model_id)
     segments_meta = _write_segments_context(conf, image, objects, caption_text, scene_hint)
     prompts = build_audio_prompts(

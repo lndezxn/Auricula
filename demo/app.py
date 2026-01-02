@@ -22,6 +22,19 @@ from i2ss.vision.grounded_sam import (find_object_by_point, load_models, save_se
 
 DEFAULT_QUERIES = "car.person.dog.cat.bus.train.motorcycle.bird.wave.fire"
 SELECTED_OVERLAY = "overlay_selected.png"
+DEVICE_CHOICES = ("cpu", "cuda")
+AUDIO_DEVICE_CHOICES = ("auto", "cpu", "cuda")
+
+
+def _resolve_device(value: str | None, default: str, allow_auto: bool, label: str) -> str:
+    selected = (value or default).strip().lower()
+    if allow_auto and selected == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if selected not in DEVICE_CHOICES:
+        raise ValueError(f"{label} must be one of {DEVICE_CHOICES}")
+    if selected == "cuda" and not torch.cuda.is_available():
+        raise ValueError(f"{label} requested 'cuda' but CUDA is not available")
+    return selected
 
 
 def _ensure_work_dirs(state: DemoState) -> None:
@@ -136,17 +149,22 @@ def _segment_handler(
     queries: str,
     scene_hint: str | None,
     device: str,
+    sam_device: str,
+    audio_device: str,
     state: DemoState,
 ) -> tuple[Path, dict[str, Any], str, None, None, DemoState]:
     if not image_path:
         raise ValueError("Please upload an image before segmenting.")
     queries = queries or DEFAULT_QUERIES
+    vision_device = _resolve_device(device, default="cpu", allow_auto=False, label="device")
+    sam_resolved = _resolve_device(sam_device, default="cpu", allow_auto=False, label="sam_device")
+    audio_resolved = _resolve_device(audio_device, default="auto", allow_auto=True, label="audio_device")
     _ensure_work_dirs(state)
     _reset_track_artifacts(state)
     dest_image = state.segments_dir / "image.png"
     shutil.copy(image_path, dest_image)
     caption = caption_image(str(dest_image))
-    dino_model, sam_predictor = load_models(device=device)
+    dino_model, sam_predictor = load_models(device=vision_device, sam_device=sam_resolved)
     image_bgr = cv2.imread(str(dest_image))
     if image_bgr is None:
         raise ValueError("Unable to read the uploaded image file.")
@@ -162,6 +180,9 @@ def _segment_handler(
         state.selected_id = state.objects[0].get("id")
     else:
         state.selected_id = None
+    state.device = vision_device
+    state.sam_device = sam_resolved
+    state.audio_device = audio_device or "auto"
     overlay_path = _highlight_overlay(state, state.selected_id)
     options = _format_object_options(state.objects)
     selected_label = options[0] if options else None
@@ -195,11 +216,15 @@ def _ensure_prompts(state: DemoState) -> dict[str, Any]:
     return prompts
 
 
+def _resolve_audio_device(state: DemoState) -> str:
+    return _resolve_device(state.audio_device, default="auto", allow_auto=True, label="audio_device")
+
+
 def _generate_full_soundscape(state: DemoState, steps: int = 100, guidance_scale: float = 3.5) -> tuple[str, DemoState]:
     if not state.objects:
         raise ValueError("No segmentation context found. Please run Segment first.")
     prompts = _ensure_prompts(state)
-    generator = AudioLDM2Generator()
+    generator = AudioLDM2Generator(device=_resolve_audio_device(state))
     seconds = int(prompts.get("seconds", state.seconds))
     base_seed = int(prompts.get("seed", state.seed))
     background_prompt = prompts["background"]
@@ -266,7 +291,7 @@ def _generate_selected_object(selected_value: str | None, state: DemoState) -> t
         obj_seed = base_seed + selected_id + 1
     else:
         obj_seed = base_seed + objects.index(obj_entry) + 1
-    generator = AudioLDM2Generator()
+    generator = AudioLDM2Generator(device=_resolve_audio_device(state))
     obj_audio, obj_sr = generator.generate(
         obj_entry["prompt"],
         int(obj_entry.get("seconds", state.seconds)),
@@ -404,7 +429,9 @@ def _handle_dropdown_change(selected_value: str | None, state: DemoState) -> tup
 
 
 def main(device: str | None = None) -> None:
-    resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    resolved_device = device or "cpu"
+    resolved_sam_device = "cpu"
+    resolved_audio_device = "auto"
     state = DemoState()
     _ensure_work_dirs(state)
 
@@ -414,7 +441,9 @@ def main(device: str | None = None) -> None:
                 image_in = gr.Image(label="Image", type="filepath")
                 queries_in = gr.Textbox(label="Queries", value=DEFAULT_QUERIES)
                 scene_hint_in = gr.Textbox(label="Scene hint", placeholder="Optional scene hint")
-                device_in = gr.Textbox(label="Device", value=resolved_device)
+                device_in = gr.Dropdown(label="GroundingDINO device", choices=DEVICE_CHOICES, value=resolved_device)
+                sam_device_in = gr.Dropdown(label="SAM device", choices=DEVICE_CHOICES, value=resolved_sam_device)
+                audio_device_in = gr.Dropdown(label="Audio device", choices=AUDIO_DEVICE_CHOICES, value=resolved_audio_device)
                 segment_btn = gr.Button("Segment")
                 full_button = gr.Button("Generate FULL")
             with gr.Column():
@@ -430,7 +459,7 @@ def main(device: str | None = None) -> None:
 
         segment_btn.click(
             fn=_segment_handler,
-            inputs=[image_in, queries_in, scene_hint_in, device_in, state_store],
+            inputs=[image_in, queries_in, scene_hint_in, device_in, sam_device_in, audio_device_in, state_store],
             outputs=[overlay_out, obj_dropdown, info_box, selected_audio_out, mix_audio_out, state_store],
         )
         obj_dropdown.change(

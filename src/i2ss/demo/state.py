@@ -14,6 +14,9 @@ class DemoState:
     scene_hint: str | None = None
     seconds: int = 10
     seed: int = 0
+    device: str = "cpu"
+    sam_device: str = "cpu"
+    audio_device: str = "auto"
     selected_id: int | None = None
     selected_overlay_path: Path | None = None
     segments_context_path: Path | None = None

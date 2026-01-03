@@ -15,8 +15,21 @@ from i2ss.audio.audioldm2 import AudioLDM2Generator
 from i2ss.audio.mix import mix_soundscape
 from i2ss.captioning import caption_image
 from i2ss.demo.state import DemoState
-from i2ss.prompting import build_audio_prompts, build_mix_meta, infer_scene_tags, save_mix_meta, save_prompts
+from i2ss.prompting import (
+    DEFAULT_MAX_NEW_TOKENS,
+    DEFAULT_VLM_DEVICE,
+    DEFAULT_VLM_MODEL,
+    VLMPromptor,
+    build_audio_prompts,
+    build_mix_meta,
+    compile_for_audioldm2,
+    infer_scene_tags,
+    save_mix_meta,
+    save_prompts,
+)
+from i2ss.prompting.build_prompts import NEGATIVE_PROMPT
 from i2ss.utils import audio_io
+from i2ss.utils import io as io_utils
 from i2ss.vision.grounded_sam import (find_object_by_point, load_models, save_segmentation,
                                        segment)
 
@@ -24,6 +37,7 @@ DEFAULT_QUERIES = "car.person.dog.cat.bus.train.motorcycle.bird.wave.fire"
 SELECTED_OVERLAY = "overlay_selected.png"
 DEVICE_CHOICES = ("cpu", "cuda")
 AUDIO_DEVICE_CHOICES = ("auto", "cpu", "cuda")
+VLM_DEVICE_CHOICES = ("auto", "cpu", "cuda:0", "cuda:1")
 
 
 def _resolve_device(value: str | None, default: str, allow_auto: bool, label: str) -> str:
@@ -34,6 +48,25 @@ def _resolve_device(value: str | None, default: str, allow_auto: bool, label: st
         raise ValueError(f"{label} must be one of {DEVICE_CHOICES}")
     if selected == "cuda" and not torch.cuda.is_available():
         raise ValueError(f"{label} requested 'cuda' but CUDA is not available")
+    return selected
+
+
+def _resolve_vlm_device(value: str | None) -> str:
+    selected = (value or "auto").strip().lower()
+    if selected == "auto":
+        if torch.cuda.is_available() and torch.cuda.device_count() >= 1:
+            return "cuda:0"
+        return "cpu"
+    if selected.startswith("cuda"):
+        if torch.cuda.is_available() and torch.cuda.device_count() >= 1:
+            try:
+                idx = int(selected.split(":", 1)[1]) if ":" in selected else 0
+            except ValueError:
+                idx = 0
+            if idx < torch.cuda.device_count():
+                return selected
+            return "cuda:0"
+        return "cpu"
     return selected
 
 
@@ -150,6 +183,7 @@ def _segment_handler(
     scene_hint: str | None,
     device: str,
     sam_device: str,
+    vlm_device: str,
     audio_device: str,
     state: DemoState,
 ) -> tuple[Path, dict[str, Any], str, None, None, DemoState]:
@@ -159,6 +193,7 @@ def _segment_handler(
     vision_device = _resolve_device(device, default="cpu", allow_auto=False, label="device")
     sam_resolved = _resolve_device(sam_device, default="cpu", allow_auto=False, label="sam_device")
     audio_resolved = _resolve_device(audio_device, default="auto", allow_auto=True, label="audio_device")
+    vlm_resolved = _resolve_vlm_device(vlm_device)
     _ensure_work_dirs(state)
     _reset_track_artifacts(state)
     dest_image = state.segments_dir / "image.png"
@@ -182,6 +217,7 @@ def _segment_handler(
         state.selected_id = None
     state.device = vision_device
     state.sam_device = sam_resolved
+    state.vlm_device = vlm_resolved
     state.audio_device = audio_device or "auto"
     overlay_path = _highlight_overlay(state, state.selected_id)
     options = _format_object_options(state.objects)
@@ -203,17 +239,70 @@ def _ensure_prompts(state: DemoState) -> dict[str, Any]:
     prompts_path = state.tracks_dir / "prompts.json"
     if prompts_path.exists():
         with prompts_path.open("r", encoding="utf-8") as fp:
-            return json.load(fp)
-    if not state.segments_context_path:
-        raise ValueError("Please run Segment before generating prompts.")
-    prompts = build_audio_prompts(
-        state.segments_context_path,
-        seconds=state.seconds,
-        seed=state.seed,
-        scene_hint=state.scene_hint,
-    )
-    save_prompts(state.tracks_dir, prompts)
-    return prompts
+            compiled = json.load(fp)
+    else:
+        if not state.segments_context_path:
+            raise ValueError("Please run Segment before generating prompts.")
+        objects_json = state.segments_dir / "objects.json"
+        promptor = VLMPromptor(
+            model_id=DEFAULT_VLM_MODEL,
+            device=_resolve_vlm_device(getattr(state, "vlm_device", None)),
+            max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
+        )
+        vlm_prompts = promptor.generate(
+            image_path=state.segments_dir / "image.png",
+            objects_json_path=objects_json,
+            seconds=state.seconds,
+            use_cache=True,
+            cache_dir=state.work_dir / "cache",
+            debug_dir=state.work_dir / "debug",
+            scene_hint=state.scene_hint,
+        )
+        compiled = compile_for_audioldm2(vlm_prompts)
+        compiled.setdefault("image_path", str(state.segments_dir / "image.png"))
+        io_utils.write_json(prompts_path, compiled)
+
+    normalized = _normalize_audio_prompts(compiled, state.seconds, state.seed)
+    return normalized
+
+
+def _normalize_audio_prompts(prompts: dict[str, Any], default_seconds: int, seed: int) -> dict[str, Any]:
+    background = prompts.get("background")
+    if isinstance(background, dict) and "prompt" in background:
+        return prompts
+
+    seconds_value = int(prompts.get("seconds", default_seconds))
+    background_prompt = prompts.get("background_prompt") or prompts.get("background", "")
+    objects_src = prompts.get("objects") or []
+    normalized_objects: list[dict[str, Any]] = []
+    for idx, obj in enumerate(objects_src):
+        if not isinstance(obj, dict):
+            continue
+        prompt_text = obj.get("sound_prompt") or obj.get("prompt") or obj.get("caption") or obj.get("label", "object")
+        normalized_objects.append(
+            {
+                "id": obj.get("id", idx),
+                "label": obj.get("label", "object"),
+                "centroid_x": float(obj.get("centroid_x", 0.5)),
+                "centroid_y": float(obj.get("centroid_y", 0.5)),
+                "area": int(obj.get("area", 0)),
+                "seconds": int(obj.get("seconds", seconds_value)),
+                "prompt": prompt_text,
+                "negative_prompt": obj.get("negative_prompt", NEGATIVE_PROMPT),
+            }
+        )
+
+    return {
+        "image_path": prompts.get("image_path"),
+        "seconds": seconds_value,
+        "seed": int(prompts.get("seed", seed)),
+        "caption": prompts.get("scene_caption"),
+        "background": {
+            "prompt": background_prompt,
+            "negative_prompt": NEGATIVE_PROMPT,
+        },
+        "objects": normalized_objects,
+    }
 
 
 def _resolve_audio_device(state: DemoState) -> str:
@@ -443,6 +532,7 @@ def main(device: str | None = None) -> None:
                 scene_hint_in = gr.Textbox(label="Scene hint", placeholder="Optional scene hint")
                 device_in = gr.Dropdown(label="GroundingDINO device", choices=DEVICE_CHOICES, value=resolved_device)
                 sam_device_in = gr.Dropdown(label="SAM device", choices=DEVICE_CHOICES, value=resolved_sam_device)
+                vlm_device_in = gr.Dropdown(label="VLM device", choices=VLM_DEVICE_CHOICES, value=DEFAULT_VLM_DEVICE)
                 audio_device_in = gr.Dropdown(label="Audio device", choices=AUDIO_DEVICE_CHOICES, value=resolved_audio_device)
                 segment_btn = gr.Button("Segment")
                 full_button = gr.Button("Generate FULL")
@@ -459,7 +549,7 @@ def main(device: str | None = None) -> None:
 
         segment_btn.click(
             fn=_segment_handler,
-            inputs=[image_in, queries_in, scene_hint_in, device_in, sam_device_in, audio_device_in, state_store],
+            inputs=[image_in, queries_in, scene_hint_in, device_in, sam_device_in, vlm_device_in, audio_device_in, state_store],
             outputs=[overlay_out, obj_dropdown, info_box, selected_audio_out, mix_audio_out, state_store],
         )
         obj_dropdown.change(

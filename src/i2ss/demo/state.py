@@ -16,6 +16,7 @@ class DemoState:
     seed: int = 0
     device: str = "cpu"
     sam_device: str = "cpu"
+    vlm_device: str = "auto"
     audio_device: str = "auto"
     selected_id: int | None = None
     selected_overlay_path: Path | None = None

@@ -2,9 +2,13 @@ An interactive image to soundscape generation tool.
 
 ## Usage
 
-`python -m i2ss.cli run --image assets/test.jpg --queries "car.person.dog" --out out_test`
+```
+python -m i2ss.cli run --image assets/test.jpg --queries "car.person.dog" --out out_vlm --vlm-device cuda:0
+```
 
-`python -m i2ss.cli mix --tracks-dir out_test/tracks --meta-json out_test/tracks/meta.json --out out_test/mix/mix.wav`
+```
+python -m i2ss.cli mix --tracks-dir out_test/tracks --meta-json out_test/tracks/meta.json --out out_test/mix/mix.wav
+```
 
 For Gradio app, close all proxy first
 
@@ -15,7 +19,9 @@ export no_proxy="$NO_PROXY"
 
 then
 
-`python ./demo/app.py`
+```
+python ./demo/app.py
+```
 
 ## Device recommendations
 

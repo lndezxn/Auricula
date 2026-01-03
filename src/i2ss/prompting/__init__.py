@@ -10,6 +10,14 @@ from .build_prompts import (
     save_prompts,
     sound_phrase_for_label,
 )
+from .scene_object_prompt import (
+    ObjectPrompt,
+    ScenePrompt,
+    compute_object_seconds,
+    normalize_objects,
+    object_area_range,
+)
+from .vlm_promptor import DEFAULT_MAX_NEW_TOKENS, DEFAULT_VLM_DEVICE, DEFAULT_VLM_MODEL, VLMPromptor
 
 __all__ = [
     "infer_scene_tags",
@@ -20,4 +28,13 @@ __all__ = [
     "build_mix_meta",
     "save_prompts",
     "save_mix_meta",
+    "ObjectPrompt",
+    "ScenePrompt",
+    "compute_object_seconds",
+    "normalize_objects",
+    "object_area_range",
+    "VLMPromptor",
+    "DEFAULT_VLM_MODEL",
+    "DEFAULT_VLM_DEVICE",
+    "DEFAULT_MAX_NEW_TOKENS",
 ]

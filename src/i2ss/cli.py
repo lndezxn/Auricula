@@ -13,12 +13,17 @@ import torch
 from .captioning import caption_image, save_caption
 from .config import Config
 from .prompting import (
+    DEFAULT_MAX_NEW_TOKENS,
+    DEFAULT_VLM_DEVICE,
+    DEFAULT_VLM_MODEL,
+    VLMPromptor,
     build_audio_prompts,
     build_mix_meta,
     infer_scene_tags,
     save_mix_meta,
     save_prompts,
 )
+from .prompting.build_prompts import NEGATIVE_PROMPT
 from .audio.audioldm2 import AudioLDM2Generator
 from .audio.mix import mix_soundscape
 from .utils import audio_io, io as io_utils
@@ -128,6 +133,47 @@ def _read_json_object(source: Path) -> dict[str, Any]:
 
 def _load_prompts(prompts_json: Path) -> dict[str, Any]:
     return _read_json_object(prompts_json)
+
+
+def _normalize_audio_prompts(prompts: dict[str, Any], default_seconds: int, seed: int) -> dict[str, Any]:
+    """Allow the renderer to accept either template or VLM prompt layouts."""
+
+    background = prompts.get("background")
+    if isinstance(background, dict) and "prompt" in background:
+        return prompts
+
+    background_prompt = prompts.get("background_prompt") or prompts.get("background", "")
+    seconds_value = int(prompts.get("seconds", default_seconds))
+    objects_src = prompts.get("objects") or []
+    normalized_objects: list[dict[str, Any]] = []
+    for idx, obj in enumerate(objects_src):
+        if not isinstance(obj, dict):
+            continue
+        prompt_text = obj.get("sound_prompt") or obj.get("prompt") or obj.get("caption") or obj.get("label", "object")
+        normalized_objects.append(
+            {
+                "id": obj.get("id", idx),
+                "label": obj.get("label", "object"),
+                "centroid_x": float(obj.get("centroid_x", 0.5)),
+                "centroid_y": float(obj.get("centroid_y", 0.5)),
+                "area": int(obj.get("area", 0)),
+                "seconds": int(obj.get("seconds", seconds_value)),
+                "prompt": prompt_text,
+                "negative_prompt": obj.get("negative_prompt", NEGATIVE_PROMPT),
+            }
+        )
+
+    return {
+        "image_path": prompts.get("image_path"),
+        "seconds": seconds_value,
+        "seed": int(prompts.get("seed", seed)),
+        "caption": prompts.get("scene_caption"),
+        "background": {
+            "prompt": background_prompt,
+            "negative_prompt": NEGATIVE_PROMPT,
+        },
+        "objects": normalized_objects,
+    }
 
 
 def _render_tracks(conf: Config, prompts: dict[str, Any]) -> None:
@@ -351,6 +397,26 @@ def run(
         help="Optional hint that gets appended to the caption before prompt building",
     ),
     seconds: int = typer.Option(10, help="Duration used in prompt templates"),
+    use_vlm_promptor: bool = typer.Option(
+        True,
+        help="Use a vision-language model to generate prompts",
+    ),
+    vlm_model: str = typer.Option(
+        DEFAULT_VLM_MODEL,
+        help="VLM model id (e.g. impactframes/Qwen2-VL-7B-Captioner)",
+    ),
+    vlm_device: str = typer.Option(
+        DEFAULT_VLM_DEVICE,
+        help="Device for VLM promptor (e.g. cuda:0)",
+    ),
+    vlm_max_new_tokens: int = typer.Option(
+        DEFAULT_MAX_NEW_TOKENS,
+        help="Max new tokens when sampling the VLM",
+    ),
+    no_cache: bool = typer.Option(
+        False,
+        help="Disable cached VLM prompt reuse",
+    ),
     device: Literal["cpu", "cuda"] = typer.Option(
         "cpu",
         help="Device for GroundingDINO (cpu or cuda)",
@@ -366,17 +432,37 @@ def run(
     objects, _ = _segment_and_save(image, queries, conf, device, sam_device)
     caption_text = _generate_caption(image, conf, caption_model_id)
     segments_meta = _write_segments_context(conf, image, objects, caption_text, scene_hint)
-    prompts = build_audio_prompts(
-        segments_context_json_path=segments_meta,
-        seconds=seconds,
-        seed=conf.seed,
-        scene_hint=scene_hint,
-    )
-    save_prompts(conf.tracks_dir, prompts)
-    mix_meta = build_mix_meta(prompts, conf.tracks_dir)
+    objects_json_path = conf.segments_dir / "objects.json"
+    if use_vlm_promptor:
+        promptor = VLMPromptor(
+            model_id=vlm_model,
+            device=vlm_device,
+            max_new_tokens=vlm_max_new_tokens,
+        )
+        prompts = promptor.generate(
+            image_path=image,
+            objects_json_path=objects_json_path,
+            seconds=seconds,
+            use_cache=not no_cache,
+            cache_dir=conf.out_dir / "cache",
+            debug_dir=conf.out_dir / "debug",
+        )
+        prompts.setdefault("image_path", str(image))
+        io_utils.write_json(conf.tracks_dir / "prompts.json", prompts)
+    else:
+        prompts = build_audio_prompts(
+            segments_context_json_path=segments_meta,
+            seconds=seconds,
+            seed=conf.seed,
+            scene_hint=scene_hint,
+        )
+        save_prompts(conf.tracks_dir, prompts)
+
+    audio_prompts = _normalize_audio_prompts(prompts, seconds, conf.seed)
+    mix_meta = build_mix_meta(audio_prompts, conf.tracks_dir)
     save_mix_meta(conf.tracks_dir, mix_meta)
     conf.seconds = seconds
-    _render_tracks(conf, prompts)
+    _render_tracks(conf, audio_prompts)
     typer.echo(
         f"Run completed: {len(objects)} detections -> {conf.segments_dir}, tracks -> {conf.tracks_dir}, prompts -> {conf.tracks_dir / 'prompts.json'}, meta -> {conf.tracks_dir / 'meta.json'}"
     )

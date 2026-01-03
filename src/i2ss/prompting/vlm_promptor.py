@@ -10,6 +10,7 @@ from typing import Any, Iterable, Sequence
 import cv2
 import numpy as np
 import torch
+import yaml
 from PIL import Image
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
@@ -33,6 +34,7 @@ from .scene_object_prompt import (
 DEFAULT_VLM_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
 DEFAULT_VLM_DEVICE = "cuda:1"
 DEFAULT_MAX_NEW_TOKENS = 256
+DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parents[3] / "configs" / "vlm_prompts.yaml"
 
 
 def resize_max_side(image: Image.Image, max_side: int) -> Image.Image:
@@ -62,6 +64,7 @@ class VLMPromptor:
         model_id: str = DEFAULT_VLM_MODEL,
         device: str = DEFAULT_VLM_DEVICE,
         max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+        template_path: Path | str | None = DEFAULT_TEMPLATE_PATH,
     ) -> None:
         if process_vision_info is None:
             raise ImportError(
@@ -77,6 +80,7 @@ class VLMPromptor:
             device_map={"": device},
         )
         self.max_new_tokens = max_new_tokens
+        self.scene_template, self.object_template = self._load_templates(template_path)
 
     def generate(
         self,
@@ -86,22 +90,33 @@ class VLMPromptor:
         use_cache: bool = True,
         cache_dir: Path | str | None = None,
         debug_dir: Path | str | None = None,
+        scene_hint: str | None = None,
     ) -> dict[str, Any]:
         image_path = Path(image_path)
         objects_json_path = Path(objects_json_path)
-        cache_path = self._resolve_cache_path(image_path, objects_json_path, cache_dir)
+        cache_path = self._resolve_cache_path(image_path, objects_json_path, cache_dir, scene_hint)
         if use_cache and cache_path is not None and cache_path.exists():
             with cache_path.open(encoding="utf-8") as fp:
                 return json.load(fp)
 
         scene_objects = self._load_objects(objects_json_path)
         base_image = Image.open(image_path).convert("RGB")
-        scene_prompt = self._generate_scene_prompt(base_image, seconds, debug_dir)
+        image_area = base_image.size[0] * base_image.size[1]
+        scene_prompt = self._generate_scene_prompt(base_image, seconds, scene_objects, scene_hint, debug_dir)
         min_area, max_area = object_area_range(scene_objects)
         object_prompts: list[dict[str, Any]] = []
         for obj in scene_objects:
             crop = self._crop_object(base_image, objects_json_path.parent, obj)
-            object_result = self._generate_object_prompt(crop, obj.get("label", "object"), debug_dir)
+            other_labels = ", ".join(
+                sorted(
+                    {
+                        str(o.get("label", "object"))
+                        for o in scene_objects
+                        if o is not obj and o.get("label")
+                    }
+                )
+            )
+            object_result = self._generate_object_prompt(crop, obj, other_labels, scene_hint, image_area, debug_dir)
             seconds_value = compute_object_seconds(int(obj.get("area", 0)), min_area, max_area)
             normalized = ObjectPrompt(
                 id=int(obj.get("id", len(object_prompts))),
@@ -132,16 +147,16 @@ class VLMPromptor:
         self,
         image: Image.Image,
         seconds: int,
+        objects: list[dict[str, Any]],
+        scene_hint: str | None,
         debug_dir: Path | str | None,
     ) -> ScenePrompt:
-        instruction = (
-            "You are an audio prompt engineer. "
-            "Return a strict JSON object with keys scene_caption and background_prompt. "
-            "scene_caption: 1-2 sentences describing the entire image in English. "
-            "background_prompt: a concise ambient sound bed description for a realistic field recording, "
-            "lasting about {seconds} seconds, no music, no singing, no narration. "
-            "Do not include any extra text outside the JSON object."
-        ).format(seconds=seconds)
+        labels_list = ", ".join(sorted({str(obj.get("label", "object")) for obj in objects}))
+        instruction = self.scene_template.format(
+            seconds=seconds,
+            labels_list=labels_list,
+            scene_hint=scene_hint or "",
+        )
         result = self._invoke_vlm(
             messages=[
                 {
@@ -165,22 +180,33 @@ class VLMPromptor:
     def _generate_object_prompt(
         self,
         crop: Image.Image,
-        label: str,
+        obj: dict[str, Any],
+        other_labels: str,
+        scene_hint: str | None,
+        image_area: int,
         debug_dir: Path | str | None,
     ) -> dict[str, str]:
-        instruction = (
-            "You see a cropped region of a segmented object labeled '{label}'. "
-            "Respond with a strict JSON object: {{\"caption\": <visual_description>, \"sound_prompt\": <sound_description>}}. "
-            "caption: concise English description of this object in the crop. "
-            "sound_prompt: one sentence (<= 22 words) in English describing a realistic sound effect or field recording of this object; "
-            "no music, no singing, no narration. Return JSON only."
-        ).format(label=label)
+        label = str(obj.get("label", "object"))
+        bbox = obj.get("box_xyxy") or []
+        bbox_text = ",".join(str(round(v, 2)) for v in bbox) if bbox else ""
+        area = int(obj.get("area", 0))
+        relative_size = round(area / image_area, 6) if image_area > 0 else 0.0
+        instruction = self.object_template.format(
+            label=label,
+            bbox=bbox_text,
+            centroid_x=float(obj.get("centroid_x", 0.5)),
+            centroid_y=float(obj.get("centroid_y", 0.5)),
+            relative_size=relative_size,
+            seconds=int(obj.get("seconds", 0)) or "",
+            other_labels=other_labels,
+            scene_hint=scene_hint or "",
+        )
         result = self._invoke_vlm(
             messages=[
                 {
                     "role": "user",
                     "content": [
-                                {"type": "image", "image": resize_max_side(crop, 672)},
+                        {"type": "image", "image": resize_max_side(crop, 672)},
                         {"type": "text", "text": instruction},
                     ],
                 }
@@ -284,21 +310,52 @@ class VLMPromptor:
         image_path: Path,
         objects_json_path: Path,
         cache_dir: Path | str | None,
+        scene_hint: str | None,
     ) -> Path | None:
         if cache_dir is None:
             return None
         cache_dir = Path(cache_dir)
-        digest = self._hash_inputs(image_path, objects_json_path)
+        digest = self._hash_inputs(image_path, objects_json_path, scene_hint)
         return cache_dir / f"vlm_prompts_{digest}.json"
 
-    def _hash_inputs(self, image_path: Path, objects_json_path: Path) -> str:
+    def _hash_inputs(self, image_path: Path, objects_json_path: Path, scene_hint: str | None) -> str:
         hasher = hashlib.sha256()
         hasher.update(str(image_path.resolve()).encode("utf-8"))
         hasher.update(str(objects_json_path.resolve()).encode("utf-8"))
         if objects_json_path.exists():
             hasher.update(objects_json_path.read_bytes())
         hasher.update(self.model_id.encode("utf-8"))
+        if scene_hint:
+            hasher.update(scene_hint.encode("utf-8"))
+        hasher.update(self.scene_template.encode("utf-8"))
+        hasher.update(self.object_template.encode("utf-8"))
         return hasher.hexdigest()[:16]
+
+    def _load_templates(self, template_path: Path | str | None) -> tuple[str, str]:
+        default_scene = (
+            "You are an audio prompt engineer. Return only a JSON object with keys "
+            "\"scene_caption\" and \"background_prompt\". "
+            "scene_caption: objective visual description of the full image (no imagined sounds). "
+            "background_prompt: concise ambience/field recording bed for AudioLDM2, realistic, no music/singing/narration, about {seconds} seconds. "
+            "Context labels: [{labels_list}]. Scene hint: {scene_hint}."
+        )
+        default_object = (
+            "You see a cropped object labeled \"{label}\" with bbox [{bbox}] and centroid_x {centroid_x}, centroid_y {centroid_y}, relative_size {relative_size}. "
+            "Return only a JSON object {{{{\"caption\": <visual>, \"sound_prompt\": <audio>}}}}. "
+            "caption: concise visual description including position (left/center/right and foreground/background). "
+            "sound_prompt: <=22 words, realistic sound effect/field recording of this object, no music/singing/narration, target duration about {seconds} seconds. "
+            "Scene hint: {scene_hint}."
+        )
+        if template_path is None:
+            return default_scene, default_object
+        path = Path(template_path)
+        if not path.exists():
+            return default_scene, default_object
+        with path.open(encoding="utf-8") as fp:
+            data = yaml.safe_load(fp) or {}
+        scene_template = str(data.get("scene_template", default_scene))
+        object_template = str(data.get("object_template", default_object))
+        return scene_template, object_template
 
     def _debug_path(self, debug_dir: Path | str | None, name: str) -> Path | None:
         if debug_dir is None:

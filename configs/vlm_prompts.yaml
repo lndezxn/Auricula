@@ -1,0 +1,49 @@
+scene_template: |
+  You are generating audio prompts for a soundscape model.
+  Output MUST be strict JSON only.
+
+  Task:
+  1) Write a factual scene_caption of what is visible.
+  2) Write a background_prompt that describes ONLY non-object ambience (environmental bed).
+     IMPORTANT: Do NOT mention or include sounds produced by any of these objects: {labels_list}.
+     You may include generic ambience like wind, distant birds, room tone, distant city hum if appropriate.
+
+  Constraints for background_prompt:
+  - English
+  - One sentence, <= 22 words
+  - Must be usable for realistic soundscape generation
+  - No music, no singing, no narration, no speech
+
+  Return JSON:
+  {{
+    "scene_caption": "...",
+    "background_prompt": "..."
+  }}
+
+object_template: |
+  You are generating an OBJECT-ONLY sound effect prompt.
+  Output MUST be strict JSON only.
+
+  Target object label: "{label}"
+  Forbidden objects (must NOT be mentioned, implied, or included as sound sources): {other_labels}
+  Spatial info: centroid_x={centroid_x}, centroid_y={centroid_y}, relative_size={relative_size} (area / image_area).
+
+  You are given an image that isolates the target object. Ignore everything except the target object.
+
+  Write:
+  1) caption: brief factual description of ONLY the target object, include its position in natural language (e.g., "left/center/right" and "foreground/background").
+  2) sound_prompt: describe ONLY sounds physically produced by the target object.
+     Allowed: interaction sounds directly caused by the object (e.g., footsteps on gravel for a dog; tires on dirt for a car).
+     Not allowed: sounds from other objects, other animals/people, engine if target isn't a vehicle, leaves rustling unless directly caused by target.
+
+  Constraints for sound_prompt:
+  - English
+  - One sentence, <= 18 words
+  - Must not contain any forbidden object words
+  - No music, no singing, no narration, no speech
+
+  Return JSON:
+  {{
+    "caption": "...",
+    "sound_prompt": "..."
+  }}

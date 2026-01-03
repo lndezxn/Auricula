@@ -17,6 +17,7 @@ from .scene_object_prompt import (
     normalize_objects,
     object_area_range,
 )
+from .prompt_compiler import compile_for_audioldm2
 from .vlm_promptor import DEFAULT_MAX_NEW_TOKENS, DEFAULT_VLM_DEVICE, DEFAULT_VLM_MODEL, VLMPromptor
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "compute_object_seconds",
     "normalize_objects",
     "object_area_range",
+    "compile_for_audioldm2",
     "VLMPromptor",
     "DEFAULT_VLM_MODEL",
     "DEFAULT_VLM_DEVICE",

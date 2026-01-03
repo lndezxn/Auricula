@@ -16,6 +16,7 @@ from .prompting import (
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_VLM_DEVICE,
     DEFAULT_VLM_MODEL,
+    compile_for_audioldm2,
     VLMPromptor,
     build_audio_prompts,
     build_mix_meta,
@@ -439,16 +440,19 @@ def run(
             device=vlm_device,
             max_new_tokens=vlm_max_new_tokens,
         )
-        prompts = promptor.generate(
+        vlm_prompts = promptor.generate(
             image_path=image,
             objects_json_path=objects_json_path,
             seconds=seconds,
             use_cache=not no_cache,
             cache_dir=conf.out_dir / "cache",
             debug_dir=conf.out_dir / "debug",
+            scene_hint=scene_hint,
         )
-        prompts.setdefault("image_path", str(image))
-        io_utils.write_json(conf.tracks_dir / "prompts.json", prompts)
+        compiled_prompts = compile_for_audioldm2(vlm_prompts)
+        compiled_prompts.setdefault("image_path", str(image))
+        io_utils.write_json(conf.tracks_dir / "prompts.json", compiled_prompts)
+        prompts = compiled_prompts
     else:
         prompts = build_audio_prompts(
             segments_context_json_path=segments_meta,

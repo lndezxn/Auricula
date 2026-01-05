@@ -12,7 +12,6 @@ scene_template: |
   - English
   - One sentence, <= 22 words
   - Must be usable for realistic soundscape generation
-  - No music, no singing, no narration, no speech
 
   Return JSON:
   {{
@@ -40,7 +39,6 @@ object_template: |
   - English
   - One sentence, <= 18 words
   - Must not contain any forbidden object words
-  - No music, no singing, no narration, no speech
 
   Return JSON:
   {{

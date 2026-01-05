@@ -7,7 +7,7 @@ python -m i2ss.cli run --image assets/test.jpg --queries "car.person.dog" --out 
 ```
 
 ```
-python -m i2ss.cli mix --tracks-dir out_test/tracks --meta-json out_test/tracks/meta.json --out out_test/mix/mix.wav
+python -m i2ss.cli mix --tracks-dir out_vlm/tracks --meta-json out_vlm/tracks/meta.json --out out_vlm/mix/mix.wav
 ```
 
 For Gradio app, close all proxy first
@@ -15,7 +15,7 @@ For Gradio app, close all proxy first
 ```
 export NO_PROXY="localhost,127.0.0.1,::1"
 export no_proxy="$NO_PROXY"
-```
+``` 
 
 then
 

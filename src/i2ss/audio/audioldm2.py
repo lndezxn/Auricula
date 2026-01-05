@@ -5,6 +5,7 @@ import torch
 from diffusers import AudioLDM2Pipeline
 from types import MethodType
 from transformers.generation.utils import GenerationMixin
+from transformers import AutoModelForCausalLM
 from typing import Iterable, Tuple
 
 
@@ -19,11 +20,45 @@ class AudioLDM2Generator:
     ) -> None:
         dtype_attr = getattr(torch, torch_dtype, torch.float16)
         self.device = torch.device(device)
-        self.pipe = AudioLDM2Pipeline.from_pretrained(model_id, torch_dtype=dtype_attr)
+        try:
+            self.pipe = AudioLDM2Pipeline.from_pretrained(model_id, torch_dtype=dtype_attr)
+        except TypeError:
+            self.pipe = AudioLDM2Pipeline.from_pretrained(model_id, dtype=dtype_attr)
         self.pipe.to(self.device)
         if hasattr(self.pipe, "safety_checker"):
             self.pipe.safety_checker = None
+        self._ensure_causal_language_model(model_id, dtype_attr)
         self._patch_language_model()
+
+    def _ensure_causal_language_model(self, model_id: str, dtype_attr: torch.dtype) -> None:
+        """Ensure the pipeline's language_model supports generation.
+
+        With some dependency combinations, diffusers may load a plain GPT2Model, but
+        AudioLDM2's prompt encoding calls generation-only helpers. Replacing it with
+        a causal LM fixes encode_prompt and improves prompt conditioning stability.
+        """
+
+        language_model = getattr(self.pipe, "language_model", None)
+        if language_model is None:
+            return
+
+        if hasattr(language_model, "generate") and hasattr(language_model, "_get_initial_cache_position"):
+            return
+
+        try:
+            causal = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                subfolder="language_model",
+                torch_dtype=dtype_attr,
+            )
+            causal.to(self.device, dtype=dtype_attr)
+            self.pipe.language_model = causal
+            components = getattr(self.pipe, "components", None)
+            if isinstance(components, dict):
+                components["language_model"] = causal
+        except Exception:
+            # Fall back to patching GenerationMixin methods below.
+            return
 
     def _patch_language_model(self) -> None:
         language_model = getattr(self.pipe, "language_model", None)
@@ -57,13 +92,13 @@ class AudioLDM2Generator:
         negative_prompt: str | None = None,
     ) -> Tuple[np.ndarray, int]:
         generator = torch.Generator(device=self.device).manual_seed(seed)
-        final_negative_prompt = "Low quality." if negative_prompt is None else f"{negative_prompt} Low quality."
+        final_negative_prompt = "Low quality." if negative_prompt is None else negative_prompt
         kwargs: dict[str, object] = {
             "prompt": prompt,
             "audio_length_in_s": float(seconds),
-            "num_inference_steps": max(num_inference_steps, 100),
-            "guidance_scale": max(3.0, guidance_scale),
-            "num_waveforms_per_prompt": 4,
+            "num_inference_steps": int(num_inference_steps),
+            "guidance_scale": float(guidance_scale),
+            "num_waveforms_per_prompt": 1,
             "generator": generator,
             "negative_prompt": final_negative_prompt,
         }

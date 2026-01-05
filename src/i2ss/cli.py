@@ -4,6 +4,7 @@ from __future__ import annotations
 import cv2
 import json
 import time
+import numpy as np
 from pathlib import Path
 from typing import Any, Literal
 
@@ -177,7 +178,13 @@ def _normalize_audio_prompts(prompts: dict[str, Any], default_seconds: int, seed
     }
 
 
-def _render_tracks(conf: Config, prompts: dict[str, Any]) -> None:
+def _render_tracks(
+    conf: Config,
+    prompts: dict[str, Any],
+    *,
+    steps: int = 100,
+    guidance_scale: float = 3.5,
+) -> None:
     io_utils.ensure_dir(conf.tracks_dir)
     sample_rate = audio_io.TARGET_SAMPLE_RATE
     seconds = int(prompts.get("seconds", conf.seconds))
@@ -190,26 +197,116 @@ def _render_tracks(conf: Config, prompts: dict[str, Any]) -> None:
         background_cfg.get("prompt", "Background ambience"),
         seconds,
         seed,
-        num_inference_steps=50,
-        guidance_scale=3.5,
+        num_inference_steps=steps,
+        guidance_scale=guidance_scale,
         negative_prompt=background_negative,
     )
     background_wave, _ = audio_io.prepare_waveform(background_wave, background_sr, seconds, target_sr=sample_rate)
     audio_io.write_audio(conf.tracks_dir / "background.wav", background_wave, sample_rate)
 
+    tonality_threshold = 80.0
+    person_low_band_threshold = 45.0
+    person_high_band_threshold = 60.0
+    min_rms = 0.01
+    max_retries = 2
+    person_max_retries = 4
+
+    def _attempt_penalty(
+        *,
+        ratio: float,
+        rms: float,
+        low_ratio: float,
+        high_ratio: float,
+        is_person: bool,
+    ) -> float:
+        penalty = max(0.0, ratio - tonality_threshold)
+        if is_person:
+            penalty += 0.5 * max(0.0, low_ratio - person_low_band_threshold)
+            penalty += 0.5 * max(0.0, high_ratio - person_high_band_threshold)
+        if rms < min_rms:
+            penalty += 200.0 * (min_rms - rms) / max(min_rms, 1e-6)
+        return penalty
+
     for idx, obj in enumerate(prompts.get("objects", [])):
         track_path = audio_io.build_object_path(conf.tracks_dir, obj.get("id", idx), obj.get("label", "object"))
         duration = int(obj.get("seconds", seconds))
         obj_seed = seed + int(obj.get("id", idx)) + 1
-        obj_wave, obj_sr = generator.generate(
-            obj.get("prompt", obj.get("label", "object")),
-            duration,
-            obj_seed,
-            num_inference_steps=50,
-            guidance_scale=3.5,
-            negative_prompt=obj.get("negative_prompt"),
-        )
-        obj_wave, _ = audio_io.prepare_waveform(obj_wave, obj_sr, duration, target_sr=sample_rate)
+        label = str(obj.get("label", "object"))
+        prompt_text = obj.get("prompt", label)
+        negative_text = obj.get("negative_prompt")
+
+        best_wave = None
+        best_sr = None
+        best_ratio = float("inf")
+        best_hz = 0.0
+        best_rms = 0.0
+        best_low_ratio = 0.0
+        best_high_ratio = 0.0
+        best_penalty = float("inf")
+        current_seed = obj_seed
+        is_person = label.lower() == "person"
+        retries_for_obj = person_max_retries if is_person else max_retries
+        for attempt in range(retries_for_obj + 1):
+            attempt_prompt = prompt_text
+            attempt_negative = negative_text
+            if is_person:
+                # Make footsteps more explicit; discourage periodic hum/pulsing.
+                if "footstep" not in str(attempt_prompt).lower():
+                    attempt_prompt = f"clearly audible, clear, distinct footsteps on pavement, walking, shoes. {attempt_prompt}"
+                else:
+                    attempt_prompt = f"clearly audible, clear, distinct {attempt_prompt}"
+                extra_neg = "low-frequency hum, rumble, drone, pulsing, periodic noise"
+                attempt_negative = f"{attempt_negative}, {extra_neg}" if attempt_negative else extra_neg
+
+            obj_wave, obj_sr = generator.generate(
+                attempt_prompt,
+                duration,
+                current_seed,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                negative_prompt=attempt_negative,
+            )
+            prepared, _ = audio_io.prepare_waveform(obj_wave, obj_sr, duration, target_sr=sample_rate)
+            dominant_hz, ratio = audio_io.tonality_ratio(prepared, sample_rate)
+            rms = float(np.sqrt(np.mean(np.square(prepared)))) if prepared.size else 0.0
+            low_hz, low_ratio = audio_io.tonality_ratio(prepared, sample_rate, fmin=20.0, fmax=300.0)
+            high_hz, high_ratio = audio_io.tonality_ratio(prepared, sample_rate, fmin=800.0, fmax=4000.0)
+
+            bad = ratio > tonality_threshold or rms < min_rms
+            if is_person:
+                bad = bad or (low_ratio > person_low_band_threshold) or (high_ratio > person_high_band_threshold)
+
+            penalty = _attempt_penalty(
+                ratio=ratio,
+                rms=rms,
+                low_ratio=low_ratio,
+                high_ratio=high_ratio,
+                is_person=is_person,
+            )
+            if penalty < best_penalty or (penalty == best_penalty and rms > best_rms):
+                best_wave = prepared
+                best_sr = sample_rate
+                best_ratio = ratio
+                best_hz = dominant_hz
+                best_rms = rms
+                best_low_ratio = low_ratio
+                best_high_ratio = high_ratio
+                best_penalty = penalty
+            if not bad:
+                break
+            current_seed += 1000 * (attempt + 1)
+
+        if best_ratio > tonality_threshold:
+            typer.echo(
+                f"Warning: tonal artifact suspected for {track_path.name} (peak/median={best_ratio:.1f} @ {best_hz:.0f}Hz)"
+            )
+
+        if best_rms < min_rms:
+            typer.echo(
+                f"Warning: near-silent track for {track_path.name} (rms={best_rms:.4f}, low_ratio={best_low_ratio:.1f}, high_ratio={best_high_ratio:.1f})"
+            )
+
+        obj_wave = best_wave
         audio_io.write_audio(track_path, obj_wave, sample_rate)
 
 
@@ -418,6 +515,14 @@ def run(
         False,
         help="Disable cached VLM prompt reuse",
     ),
+    audio_steps: int = typer.Option(
+        100,
+        help="Diffusion steps used per track for AudioLDM2",
+    ),
+    audio_guidance_scale: float = typer.Option(
+        3.5,
+        help="Guidance scale used per track for AudioLDM2",
+    ),
     device: Literal["cpu", "cuda"] = typer.Option(
         "cpu",
         help="Device for GroundingDINO (cpu or cuda)",
@@ -429,6 +534,10 @@ def run(
 ) -> None:
     if seconds <= 0:
         raise typer.BadParameter("seconds must be greater than zero")
+    if audio_steps <= 0:
+        raise typer.BadParameter("audio_steps must be greater than zero")
+    if audio_guidance_scale <= 0:
+        raise typer.BadParameter("audio_guidance_scale must be positive")
     conf = _prepare_config(out)
     objects, _ = _segment_and_save(image, queries, conf, device, sam_device)
     caption_text = _generate_caption(image, conf, caption_model_id)
@@ -466,7 +575,7 @@ def run(
     mix_meta = build_mix_meta(audio_prompts, conf.tracks_dir)
     save_mix_meta(conf.tracks_dir, mix_meta)
     conf.seconds = seconds
-    _render_tracks(conf, audio_prompts)
+    _render_tracks(conf, audio_prompts, steps=audio_steps, guidance_scale=audio_guidance_scale)
     typer.echo(
         f"Run completed: {len(objects)} detections -> {conf.segments_dir}, tracks -> {conf.tracks_dir}, prompts -> {conf.tracks_dir / 'prompts.json'}, meta -> {conf.tracks_dir / 'meta.json'}"
     )

@@ -12,7 +12,7 @@ class Config:
     """Holds output layout and default runtime values."""
 
     out_dir: Path = Path("out")
-    sampling_rate: int = 22050
+    sampling_rate: int = 16000
     seconds: int = 10
     seed: int = 0
 

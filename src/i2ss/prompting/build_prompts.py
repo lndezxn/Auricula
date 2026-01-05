@@ -8,7 +8,12 @@ from typing import Any
 
 from ..utils import audio_io
 
-NEGATIVE_PROMPT = "music, singing, melody, instruments, distortion, low quality"
+# Default negative prompt for AudioLDM2 generation.
+# The model can occasionally collapse into narrow-band periodic tones; discourage those explicitly.
+NEGATIVE_PROMPT = (
+    "Low quality, distortion, artifacts, noise, ringing, beeping, high-pitched tone, whistle, "
+    "low-frequency hum, rumble, drone, pulsing, periodic noise"
+)
 BACKGROUND_TEMPLATES: dict[str, str] = {
     "city": "cityscape ambience with layered traffic, subway hum, and distant chatter, realistic, stereo, {seconds} seconds",
     "indoor": "indoor room ambience, subtle reverb, quiet background noise, realistic, stereo, {seconds} seconds",

@@ -1,10 +1,26 @@
 from __future__ import annotations
 
-import difflib
 from typing import Any, Dict, List
 
 
-CONSTRAINT = "realistic, no music, no speech, high quality field recording"
+CONSTRAINT = "realistic, high quality field recording"
+
+_NO_SOUND_MARKERS = (
+    "no sound",
+    "no sounds",
+    "produces no sound",
+    "produces no sounds",
+    "silent",
+    "silence",
+    "inaudible",
+)
+
+_FALLBACK_BY_LABEL = {
+    "person": "footsteps on pavement",
+    "car": "car engine idling and passing traffic",
+    "bicycle": "bicycle chain and wheels rolling",
+    "dog": "dog barking",
+}
 
 
 def _append_constraint(text: str) -> str:
@@ -20,43 +36,13 @@ def _append_constraint(text: str) -> str:
     return f"{head}, {CONSTRAINT}" if head else CONSTRAINT
 
 
-def _similar(a: str, b: str) -> float:
-    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-
-def _deduplicate_objects(objs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    kept: List[Dict[str, Any]] = []
-    for obj in objs:
-        sound = str(obj.get("sound_prompt", ""))
-        label = str(obj.get("label", "object"))
-        area = int(obj.get("area", 0))
-        duplicate_of = None
-        for idx, existing in enumerate(kept):
-            if _similar(sound, str(existing.get("sound_prompt", ""))) > 0.85:
-                duplicate_of = idx
-                break
-        if duplicate_of is None:
-            kept.append(obj)
-            continue
-        # Decide which to keep based on area
-        existing = kept[duplicate_of]
-        existing_area = int(existing.get("area", 0))
-        if area > existing_area:
-            # Replace existing with the larger area version; downgrade existing
-            downgraded = {
-                **existing,
-                "sound_prompt": _append_constraint(f"{existing.get('label', 'object')} sound effect"),
-            }
-            kept[duplicate_of] = obj
-            kept.append(downgraded)
-        else:
-            downgraded = {
-                **obj,
-                "sound_prompt": _append_constraint(f"{label} sound effect"),
-            }
-            kept.append(downgraded)
-    return kept
-
+def _sanitize_sound_prompt(text: str, label: str) -> str:
+    base = (text or "").strip()
+    lowered = base.lower()
+    if any(marker in lowered for marker in _NO_SOUND_MARKERS) or not base:
+        fallback = _FALLBACK_BY_LABEL.get((label or "").strip().lower(), f"{label or 'object'} sound")
+        return fallback
+    return base
 
 def compile_for_audioldm2(vlm_json: Dict[str, Any]) -> Dict[str, Any]:
     """Post-process VLM outputs into prompts compatible with AudioLDM2 generate command."""
@@ -71,8 +57,13 @@ def compile_for_audioldm2(vlm_json: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(obj, dict):
             continue
         augmented = dict(obj)
-        augmented["sound_prompt"] = _append_constraint(str(obj.get("sound_prompt", "")))
+        label = str(obj.get("label", "object"))
+        raw_sound = str(obj.get("sound_prompt", ""))
+        sanitized = _sanitize_sound_prompt(raw_sound, label)
+        augmented["sound_prompt"] = _append_constraint(sanitized)
         processed_objects.append(augmented)
 
-    compiled["objects"] = _deduplicate_objects(processed_objects)
+    # Keep per-object prompts intact. Avoid "deduplication" strategies that downgrade prompts
+    # to generic labels (e.g., "car sound effect"), which hurts prompt adherence.
+    compiled["objects"] = processed_objects
     return compiled

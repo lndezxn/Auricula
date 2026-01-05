@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +125,14 @@ def mix_soundscape(
         obj_seconds = int(obj.get("seconds", seconds))
         obj_wave, _ = audio_io.prepare_waveform(obj_wave, obj_sr, obj_seconds, target_sr=target_sr)
         mono_wave = _ensure_mono(obj_wave)
+
+        # Random start offset
+        start_offset_seconds = random.uniform(0, max(0, seconds - 2.0))
+        start_offset_samples = int(start_offset_seconds * target_sr)
+        if start_offset_samples > 0:
+            padding = np.zeros(start_offset_samples, dtype=mono_wave.dtype)
+            mono_wave = np.concatenate((padding, mono_wave))
+
         centroid_x = float(obj.get("centroid_x", 0.5))
         pan = max(-1.0, min(1.0, (centroid_x - 0.5) * 2.0))
         obj_stereo = stereo_pan(mono_wave, pan)

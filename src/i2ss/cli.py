@@ -192,9 +192,11 @@ def _render_tracks(
     generator = AudioLDM2Generator(device="cuda" if torch.cuda.is_available() else "cpu")
 
     background_cfg = prompts.get("background", {})
+    background_prompt_text = background_cfg.get("prompt", "Background ambience")
     background_negative = background_cfg.get("negative_prompt")
+    typer.echo(f"Generating background with prompt: {background_prompt_text}")
     background_wave, background_sr = generator.generate(
-        background_cfg.get("prompt", "Background ambience"),
+        background_prompt_text,
         seconds,
         seed,
         num_inference_steps=steps,
@@ -203,6 +205,21 @@ def _render_tracks(
     )
     background_wave, _ = audio_io.prepare_waveform(background_wave, background_sr, seconds, target_sr=sample_rate)
     audio_io.write_audio(conf.tracks_dir / "background.wav", background_wave, sample_rate)
+
+    control_prompt = prompts.get("control_prompt")
+    if control_prompt:
+        typer.echo(f"Generating control track with prompt: {control_prompt}")
+        control_wave, control_sr = generator.generate(
+            control_prompt,
+            seconds,
+            seed,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            negative_prompt=background_negative,
+        )
+        control_wave, _ = audio_io.prepare_waveform(control_wave, control_sr, seconds, target_sr=sample_rate)
+        audio_io.write_audio(conf.tracks_dir / "control.wav", control_wave, sample_rate)
+        typer.echo(f"Control audio written to {conf.tracks_dir / 'control.wav'}")
 
     tonality_threshold = 80.0
     person_low_band_threshold = 45.0
@@ -258,6 +275,7 @@ def _render_tracks(
                 extra_neg = "low-frequency hum, rumble, drone, pulsing, periodic noise"
                 attempt_negative = f"{attempt_negative}, {extra_neg}" if attempt_negative else extra_neg
 
+            typer.echo(f"Generating object '{label}' (attempt {attempt+1}) with prompt: {attempt_prompt}")
             obj_wave, obj_sr = generator.generate(
                 attempt_prompt,
                 duration,
@@ -572,6 +590,8 @@ def run(
         save_prompts(conf.tracks_dir, prompts)
 
     audio_prompts = _normalize_audio_prompts(prompts, seconds, conf.seed)
+    control_caption = audio_prompts.get("caption") or caption_text
+    audio_prompts["control_prompt"] = f"{control_caption}, realistic, high quality field recording"
     mix_meta = build_mix_meta(audio_prompts, conf.tracks_dir)
     save_mix_meta(conf.tracks_dir, mix_meta)
     conf.seconds = seconds

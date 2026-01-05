@@ -1,0 +1,57 @@
+[
+  {
+    "image": "assets/beach.png",
+    "out": "out/beach",
+    "queries": "person.ball"
+  },
+  {
+    "image": "assets/chicken.png",
+    "out": "out/chicken",
+    "queries": "chicken"
+  },
+  {
+    "image": "assets/cooking.png",
+    "out": "out/cooking",
+    "queries": "person.wok.pan.stove"
+  },
+  {
+    "image": "assets/cow.png",
+    "out": "out/cow",
+    "queries": "cow"
+  },
+  {
+    "image": "assets/dog.jpg",
+    "out": "out/dog",
+    "queries": "person.dog.car"
+  },
+  {
+    "image": "assets/street.png",
+    "out": "out/street",
+    "queries": "person.bicycle.car.bus"
+  },
+  {
+    "image": "assets/train.png",
+    "out": "out/train",
+    "queries": "person.train"
+  },
+  {
+    "image": "assets/battle.png",
+    "out": "out/battle",
+    "queries": "people.riffle.explosion.gun"
+  },
+  {
+    "image": "assets/racing.png",
+    "out": "out/racing",
+    "queries": "f1,car"
+  },
+  {
+    "image": "assets/rocket.png",
+    "out": "out/rocket",
+    "queries": "rocket,explosion"
+  },
+  {
+    "image": "assets/food.png",
+    "out": "out/food",
+    "queries": "person,cup,plate"
+  }
+]

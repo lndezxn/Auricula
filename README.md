@@ -86,6 +86,9 @@ python -m i2ss.cli mix --tracks-dir out_vlm/tracks --meta-json out_vlm/tracks/me
 ```
 
 ### Gradio app
+This project has a Gradio app for real-time interaction with the model.
+
+![](gradio.png)
 
 Ensure that proxies are closed
 

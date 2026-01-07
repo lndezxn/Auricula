@@ -1,5 +1,7 @@
 # Auricula: Adaptive Unified Region-grounded Image-conditioned Composable User-controllable Layered Audio
 
+![](auricula-pipeline.png)
+
 An interactive image to soundscape generation tool.
 
 ## 1. Installation
